@@ -221,7 +221,21 @@ def custom_load_t5(model_path: str, device: str | torch.device = "cuda", max_len
     # max length 64, 128, 256 and 512 should work (if your sequence is short enough)
     try:
         cache_dir = folder_paths.get_folder_paths("clip")[0]
-        return HFEmbedder(model_path, max_length=max_length, torch_dtype=torch.bfloat16, cache_dir=cache_dir).to(device)
+        print(f"Loading T5 model with max_length={max_length}")
+        
+        # Ensure we're using the correct model type for T5
+        model_name = os.path.basename(model_path).lower()
+        if "t5" in model_name:
+            # This is definitely a T5 model, use T5 configuration
+            embedder = HFEmbedder(model_path, max_length=max_length, torch_dtype=torch.bfloat16, cache_dir=cache_dir)
+            # Verify the model is actually T5
+            if hasattr(embedder.hf_module, 'config') and hasattr(embedder.hf_module.config, 'model_type'):
+                if embedder.hf_module.config.model_type != 't5':
+                    print(f"Warning: Expected T5 model but got {embedder.hf_module.config.model_type}")
+            return embedder.to(device)
+        else:
+            print(f"Warning: Model name {model_name} doesn't contain 't5', may not be a T5 model")
+            return HFEmbedder(model_path, max_length=max_length, torch_dtype=torch.bfloat16, cache_dir=cache_dir).to(device)
     except Exception as e:
         print(f"Error loading T5 model from {model_path}: {e}")
         # Try without cache_dir as fallback
@@ -234,7 +248,21 @@ def custom_load_t5(model_path: str, device: str | torch.device = "cuda", max_len
 def custom_load_clip(model_path: str, device: str | torch.device = "cuda") -> HFEmbedder:
     try:
         cache_dir = folder_paths.get_folder_paths("clip")[0]
-        return HFEmbedder(model_path, max_length=77, torch_dtype=torch.bfloat16, cache_dir=cache_dir).to(device)
+        print(f"Loading CLIP model with max_length=77")
+        
+        # Ensure we're using the correct model type for CLIP
+        model_name = os.path.basename(model_path).lower()
+        if "clip" in model_name:
+            # This is definitely a CLIP model, use CLIP configuration
+            embedder = HFEmbedder(model_path, max_length=77, torch_dtype=torch.bfloat16, cache_dir=cache_dir)
+            # Verify the model is actually CLIP
+            if hasattr(embedder.hf_module, 'config') and hasattr(embedder.hf_module.config, 'model_type'):
+                if embedder.hf_module.config.model_type not in ['clip', 'clip_text_model']:
+                    print(f"Warning: Expected CLIP model but got {embedder.hf_module.config.model_type}")
+            return embedder.to(device)
+        else:
+            print(f"Warning: Model name {model_name} doesn't contain 'clip', may not be a CLIP model")
+            return HFEmbedder(model_path, max_length=77, torch_dtype=torch.bfloat16, cache_dir=cache_dir).to(device)
     except Exception as e:
         print(f"Error loading CLIP model from {model_path}: {e}")
         # Try different approaches as fallbacks
@@ -339,7 +367,24 @@ class UNOModelLoader:
                     self.use_fp8 = use_fp8
                     
                     try:
-                        # 加载 CLIP 和 T5 编编码器
+                        # Validate model paths and types before loading
+                        t5_name = os.path.basename(t5_path).lower()
+                        clip_name = os.path.basename(clip_path).lower()
+                        
+                        print(f"T5 model filename: {t5_name}")
+                        print(f"CLIP model filename: {clip_name}")
+                        
+                        # Check if models are swapped
+                        if "clip" in t5_name and "t5" in clip_name:
+                            print("Warning: It appears T5 and CLIP models may be swapped!")
+                            print("Swapping model paths...")
+                            t5_path, clip_path = clip_path, t5_path
+                        elif "clip" in t5_name:
+                            print("Warning: T5 path contains a CLIP model. This may cause issues!")
+                        elif "t5" in clip_name:
+                            print("Warning: CLIP path contains a T5 model. This may cause issues!")
+                        
+                        # 加载 CLIP 和 T5 编码器
                         print("Loading CLIP model...")
                         self.clip = custom_load_clip(clip_path, device="cpu" if offload else self.device)
                         print("CLIP model loaded successfully")
@@ -347,6 +392,13 @@ class UNOModelLoader:
                         print("Loading T5 model...")
                         self.t5 = custom_load_t5(t5_path, device="cpu" if offload else self.device, max_length=512)
                         print("T5 model loaded successfully")
+                        
+                        # Validate model configurations
+                        if hasattr(self.clip, 'max_length') and self.clip.max_length != 77:
+                            print(f"Warning: CLIP model max_length is {self.clip.max_length}, expected 77")
+                        
+                        if hasattr(self.t5, 'max_length') and self.t5.max_length != 512:
+                            print(f"Warning: T5 model max_length is {self.t5.max_length}, expected 512")
                         
                         print("Loading AutoEncoder...")
                         # 加载自定义模型
