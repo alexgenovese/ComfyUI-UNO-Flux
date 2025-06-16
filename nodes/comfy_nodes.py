@@ -123,12 +123,46 @@ def custom_load_ae(ae_path, device):
 
 def custom_load_t5(model_path: str, device: str | torch.device = "cuda", max_length: int = 512) -> HFEmbedder:
     # max length 64, 128, 256 and 512 should work (if your sequence is short enough)
-    cache_dir = folder_paths.get_folder_paths("clip")[0]
-    return HFEmbedder(model_path, max_length=max_length, torch_dtype=torch.bfloat16, cache_dir=cache_dir).to(device)
+    try:
+        cache_dir = folder_paths.get_folder_paths("clip")[0]
+        return HFEmbedder(model_path, max_length=max_length, torch_dtype=torch.bfloat16, cache_dir=cache_dir).to(device)
+    except Exception as e:
+        print(f"Error loading T5 model from {model_path}: {e}")
+        # Try without cache_dir as fallback
+        try:
+            return HFEmbedder(model_path, max_length=max_length, torch_dtype=torch.bfloat16).to(device)
+        except Exception as e2:
+            print(f"Fallback T5 loading also failed: {e2}")
+            raise e2
 
 def custom_load_clip(model_path: str, device: str | torch.device = "cuda") -> HFEmbedder:
-    cache_dir = folder_paths.get_folder_paths("clip")[0]
-    return HFEmbedder(model_path, max_length=77, torch_dtype=torch.bfloat16, cache_dir=cache_dir).to(device)
+    try:
+        cache_dir = folder_paths.get_folder_paths("clip")[0]
+        return HFEmbedder(model_path, max_length=77, torch_dtype=torch.bfloat16, cache_dir=cache_dir).to(device)
+    except Exception as e:
+        print(f"Error loading CLIP model from {model_path}: {e}")
+        # Try different approaches as fallbacks
+        try:
+            # Fallback 1: Try without cache_dir
+            print("Trying CLIP fallback 1: without cache_dir")
+            return HFEmbedder(model_path, max_length=77, torch_dtype=torch.bfloat16).to(device)
+        except Exception as e2:
+            try:
+                # Fallback 2: Try with float16 instead of bfloat16
+                print("Trying CLIP fallback 2: with float16")
+                cache_dir = folder_paths.get_folder_paths("clip")[0]
+                return HFEmbedder(model_path, max_length=77, torch_dtype=torch.float16, cache_dir=cache_dir).to(device)
+            except Exception as e3:
+                try:
+                    # Fallback 3: Try with float16 and no cache_dir
+                    print("Trying CLIP fallback 3: float16 without cache_dir")
+                    return HFEmbedder(model_path, max_length=77, torch_dtype=torch.float16).to(device)
+                except Exception as e4:
+                    print(f"All CLIP loading fallbacks failed. Original error: {e}")
+                    print(f"Fallback 1 error: {e2}")
+                    print(f"Fallback 2 error: {e3}")
+                    print(f"Fallback 3 error: {e4}")
+                    raise e4
 
 
 
@@ -177,10 +211,19 @@ class UNOModelLoader:
             t5_model_path = folder_paths.get_full_path("clip", t5_model)
             clip_model_path = folder_paths.get_full_path("clip", clip_model)
             
+            # Validate model paths exist
+            for path, name in [(flux_model_path, "Flux"), (ae_model_path, "AE"), 
+                              (t5_model_path, "T5"), (clip_model_path, "CLIP")]:
+                if not os.path.exists(path):
+                    raise FileNotFoundError(f"{name} model file not found: {path}")
+            
             # 获取LoRA模型路径（如果有）
             lora_model_path = None
             if lora_model is not None and lora_model != "None":
                 lora_model_path = folder_paths.get_full_path("loras", lora_model)
+                if not os.path.exists(lora_model_path):
+                    print(f"Warning: LoRA model file not found: {lora_model_path}")
+                    lora_model_path = None
             
             print(f"Loading Flux model from: {flux_model_path}")
             print(f"Loading AE model from: {ae_model_path}")
@@ -198,19 +241,37 @@ class UNOModelLoader:
                     self.offload = offload
                     self.model_type = "flux-dev-fp8" if use_fp8 else "flux-dev"
                     self.use_fp8 = use_fp8
-                    # 加载 CLIP 和 T5 编码器
-                    self.clip = custom_load_clip(clip_path, device="cpu" if offload else self.device)
-                    self.t5 = custom_load_t5(t5_path, device="cpu" if offload else self.device, max_length=512)
                     
-                    # 加载自定义模型
-                    self.ae = custom_load_ae(ae_path, device="cpu" if offload else self.device)
-                    self.model = custom_load_flux_model(
-                        flux_path, 
-                        device="cpu" if offload else self.device, 
-                        use_fp8=use_fp8,
-                        lora_rank=lora_rank,
-                        lora_path=lora_path
-                    )
+                    try:
+                        # 加载 CLIP 和 T5 编码器
+                        print("Loading CLIP model...")
+                        self.clip = custom_load_clip(clip_path, device="cpu" if offload else self.device)
+                        print("CLIP model loaded successfully")
+                        
+                        print("Loading T5 model...")
+                        self.t5 = custom_load_t5(t5_path, device="cpu" if offload else self.device, max_length=512)
+                        print("T5 model loaded successfully")
+                        
+                        print("Loading AutoEncoder...")
+                        # 加载自定义模型
+                        self.ae = custom_load_ae(ae_path, device="cpu" if offload else self.device)
+                        print("AutoEncoder loaded successfully")
+                        
+                        print("Loading Flux model...")
+                        self.model = custom_load_flux_model(
+                            flux_path, 
+                            device="cpu" if offload else self.device, 
+                            use_fp8=use_fp8,
+                            lora_rank=lora_rank,
+                            lora_path=lora_path
+                        )
+                        print("Flux model loaded successfully")
+                        
+                    except Exception as e:
+                        print(f"Error in CustomUNOPipeline initialization: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        raise e
                     
             # 创建自定义 pipeline
             model = CustomUNOPipeline(
@@ -230,6 +291,13 @@ class UNOModelLoader:
             return (model,)
         except Exception as e:
             print(f"Error loading UNO model: {e}")
+            print(f"Model paths attempted:")
+            print(f"  Flux: {flux_model_path if 'flux_model_path' in locals() else 'Not set'}")
+            print(f"  AE: {ae_model_path if 'ae_model_path' in locals() else 'Not set'}")
+            print(f"  T5: {t5_model_path if 't5_model_path' in locals() else 'Not set'}")
+            print(f"  CLIP: {clip_model_path if 'clip_model_path' in locals() else 'Not set'}")
+            if lora_model_path:
+                print(f"  LoRA: {lora_model_path}")
             import traceback
             traceback.print_exc()
             raise e
