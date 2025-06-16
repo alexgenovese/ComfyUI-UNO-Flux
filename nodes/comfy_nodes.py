@@ -51,16 +51,27 @@ def custom_load_flux_model(model_path, device, use_fp8, lora_rank=512, lora_path
         model = Flux(params)
     
     # 如果有lora，设置 LoRA 层
-    if os.path.exists(lora_path):
+    if lora_path and os.path.exists(lora_path):
         print(f"Using only_lora mode with rank: {lora_rank}")
         model = set_lora(model, lora_rank, device="meta" if model_path is not None else device)
     
     # 加载模型权重
     if model_path is not None:
         print(f"Loading Flux model from {model_path}")
-        print("Loading lora")
-        lora_sd = load_sft(lora_path, device=str(device)) if lora_path.endswith("safetensors")\
-            else torch.load(lora_path, map_location='cpu', weights_only=False)
+        
+        # Only load LoRA if path exists
+        lora_sd = {}
+        if lora_path and os.path.exists(lora_path):
+            print("Loading lora")
+            try:
+                if lora_path.endswith("safetensors"):
+                    lora_sd = load_sft(lora_path, device=str(device))
+                else:
+                    lora_sd = torch.load(lora_path, map_location='cpu', weights_only=False)
+            except Exception as e:
+                print(f"Warning: Failed to load LoRA from {lora_path}: {e}")
+                lora_sd = {}
+        
         print("Loading main checkpoint")
         if model_path.endswith('safetensors'):
             if use_fp8:
@@ -107,18 +118,80 @@ def custom_load_ae(ae_path, device):
     # 加载自编码器权重
     if ae_path is not None:
         print(f"Loading AutoEncoder from {ae_path}")
-        if ae_path.endswith('safetensors'):
-            sd = load_sft(ae_path, device=str(device))
-        else:
-            sd = torch.load(ae_path, map_location=str(device), weights_only=False)
-        missing, unexpected = ae.load_state_dict(sd, strict=False, assign=True)
-        if len(missing) > 0:
-            print(f"Missing keys: {len(missing)}")
-        if len(unexpected) > 0:
-            print(f"Unexpected keys: {len(unexpected)}")
         
-        # 转移到目标设备
-        ae = ae.to(str(device))
+        try:
+            # First check if file exists and is readable
+            if not os.path.exists(ae_path):
+                raise FileNotFoundError(f"AutoEncoder file not found: {ae_path}")
+            
+            # Check file size to ensure it's not corrupted/empty
+            file_size = os.path.getsize(ae_path)
+            if file_size < 1024:  # Less than 1KB is likely corrupted
+                raise ValueError(f"AutoEncoder file appears to be corrupted (size: {file_size} bytes): {ae_path}")
+            
+            print(f"AutoEncoder file size: {file_size / (1024*1024):.1f} MB")
+            
+            if ae_path.endswith('safetensors'):
+                try:
+                    print("Attempting to load as safetensors...")
+                    sd = load_sft(ae_path, device=str(device))
+                except Exception as e:
+                    print(f"Failed to load as safetensors: {e}")
+                    raise e
+            else:
+                # Handle different loading methods for .sft or other formats
+                try:
+                    print("Attempting to load with torch.load...")
+                    sd = torch.load(ae_path, map_location=str(device), weights_only=False)
+                except Exception as e1:
+                    print(f"Failed with torch.load (weights_only=False): {e1}")
+                    try:
+                        print("Attempting to load with torch.load (weights_only=True)...")
+                        sd = torch.load(ae_path, map_location=str(device), weights_only=True)
+                    except Exception as e2:
+                        print(f"Failed with torch.load (weights_only=True): {e2}")
+                        try:
+                            print("Attempting to load as safetensors (fallback)...")
+                            sd = load_sft(ae_path, device=str(device))
+                        except Exception as e3:
+                            print(f"All AutoEncoder loading methods failed:")
+                            print(f"  Method 1 (torch.load weights_only=False): {e1}")
+                            print(f"  Method 2 (torch.load weights_only=True): {e2}")
+                            print(f"  Method 3 (safetensors fallback): {e3}")
+                            raise e1  # Raise the original error
+            
+            # Validate the loaded state dict
+            if not isinstance(sd, dict):
+                raise ValueError(f"Loaded state dict is not a dictionary, got {type(sd)}")
+            
+            if len(sd) == 0:
+                raise ValueError("Loaded state dict is empty")
+            
+            print(f"Successfully loaded state dict with {len(sd)} keys")
+            
+            missing, unexpected = ae.load_state_dict(sd, strict=False, assign=True)
+            if len(missing) > 0:
+                print(f"Missing keys: {len(missing)}")
+                if len(missing) <= 10:  # Only print if not too many
+                    print(f"Missing keys: {missing}")
+            if len(unexpected) > 0:
+                print(f"Unexpected keys: {len(unexpected)}")
+                if len(unexpected) <= 10:  # Only print if not too many
+                    print(f"Unexpected keys: {unexpected}")
+            
+            # 转移到目标设备
+            ae = ae.to(str(device))
+            print("AutoEncoder loaded and moved to device successfully")
+            
+        except Exception as e:
+            print(f"Critical error loading AutoEncoder from {ae_path}: {e}")
+            print("This might indicate a corrupted or incompatible AutoEncoder file.")
+            print("Please check:")
+            print("1. The file is not corrupted")
+            print("2. The file format is compatible (safetensors or pytorch)")
+            print("3. The file contains a valid AutoEncoder state dict")
+            raise e
+            
     return ae
 
 def custom_load_t5(model_path: str, device: str | torch.device = "cuda", max_length: int = 512) -> HFEmbedder:
@@ -243,7 +316,7 @@ class UNOModelLoader:
                     self.use_fp8 = use_fp8
                     
                     try:
-                        # 加载 CLIP 和 T5 编码器
+                        # 加载 CLIP 和 T5 编编码器
                         print("Loading CLIP model...")
                         self.clip = custom_load_clip(clip_path, device="cpu" if offload else self.device)
                         print("CLIP model loaded successfully")
