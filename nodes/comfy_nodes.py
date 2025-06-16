@@ -131,34 +131,52 @@ def custom_load_ae(ae_path, device):
             
             print(f"AutoEncoder file size: {file_size / (1024*1024):.1f} MB")
             
-            if ae_path.endswith('safetensors'):
-                try:
-                    print("Attempting to load as safetensors...")
-                    sd = load_sft(ae_path, device=str(device))
-                except Exception as e:
-                    print(f"Failed to load as safetensors: {e}")
-                    raise e
-            else:
-                # Handle different loading methods for .sft or other formats
-                try:
-                    print("Attempting to load with torch.load...")
-                    sd = torch.load(ae_path, map_location=str(device), weights_only=False)
-                except Exception as e1:
-                    print(f"Failed with torch.load (weights_only=False): {e1}")
+            # Try to use our safe loading method first
+            try:
+                from uno.flux.util import load_ae_safe
+                print("Using safe AutoEncoder loading method...")
+                sd = load_ae_safe(ae_path, device=str(device))
+            except (ImportError, AttributeError):
+                print("Safe loading method not available, using fallback methods...")
+                
+                # Determine file format and loading strategy
+                file_ext = os.path.splitext(ae_path)[1].lower()
+                print(f"File extension: {file_ext}")
+                
+                # Try loading strategies in order of preference
+                loading_strategies = []
+                
+                if file_ext in ['.safetensors', '.sft']:
+                    # .sft files are often safetensors with different extension
+                    loading_strategies.append(("safetensors", lambda: load_sft(ae_path, device=str(device))))
+                
+                # Try to bypass ComfyUI's torch.load wrapper
+                def bypass_torch_load():
+                    import pickle
+                    with open(ae_path, 'rb') as f:
+                        return pickle.load(f)
+                
+                loading_strategies.extend([
+                    ("direct_pickle", bypass_torch_load),
+                    ("torch_load_direct", lambda: torch.load(ae_path, map_location=str(device), weights_only=False)),
+                ])
+                
+                # Try each loading strategy
+                last_error = None
+                for strategy_name, load_func in loading_strategies:
                     try:
-                        print("Attempting to load with torch.load (weights_only=True)...")
-                        sd = torch.load(ae_path, map_location=str(device), weights_only=True)
-                    except Exception as e2:
-                        print(f"Failed with torch.load (weights_only=True): {e2}")
-                        try:
-                            print("Attempting to load as safetensors (fallback)...")
-                            sd = load_sft(ae_path, device=str(device))
-                        except Exception as e3:
-                            print(f"All AutoEncoder loading methods failed:")
-                            print(f"  Method 1 (torch.load weights_only=False): {e1}")
-                            print(f"  Method 2 (torch.load weights_only=True): {e2}")
-                            print(f"  Method 3 (safetensors fallback): {e3}")
-                            raise e1  # Raise the original error
+                        print(f"Attempting to load using strategy: {strategy_name}")
+                        sd = load_func()
+                        print(f"Successfully loaded using strategy: {strategy_name}")
+                        break
+                    except Exception as e:
+                        print(f"Failed with strategy {strategy_name}: {e}")
+                        last_error = e
+                        continue
+                else:
+                    # All strategies failed
+                    print(f"All AutoEncoder loading strategies failed. Last error: {last_error}")
+                    raise last_error
             
             # Validate the loaded state dict
             if not isinstance(sd, dict):
@@ -168,6 +186,10 @@ def custom_load_ae(ae_path, device):
                 raise ValueError("Loaded state dict is empty")
             
             print(f"Successfully loaded state dict with {len(sd)} keys")
+            
+            # Print some key names for debugging
+            sample_keys = list(sd.keys())[:5]
+            print(f"Sample keys: {sample_keys}")
             
             missing, unexpected = ae.load_state_dict(sd, strict=False, assign=True)
             if len(missing) > 0:
@@ -186,10 +208,11 @@ def custom_load_ae(ae_path, device):
         except Exception as e:
             print(f"Critical error loading AutoEncoder from {ae_path}: {e}")
             print("This might indicate a corrupted or incompatible AutoEncoder file.")
-            print("Please check:")
-            print("1. The file is not corrupted")
-            print("2. The file format is compatible (safetensors or pytorch)")
-            print("3. The file contains a valid AutoEncoder state dict")
+            print("Suggestions:")
+            print("1. Try running the debug script: python debug_ae_loading.py")
+            print("2. Check if the file is actually in safetensors format")
+            print("3. Try renaming .sft to .safetensors if it's actually safetensors")
+            print("4. Consider re-downloading the AutoEncoder model")
             raise e
             
     return ae

@@ -409,3 +409,78 @@ def load_ae(name: str, device: str | torch.device = "cuda", hf_download: bool = 
         missing, unexpected = ae.load_state_dict(sd, strict=False, assign=True)
         print_load_warning(missing, unexpected)
     return ae
+
+def load_ae_safe(ae_path, device="cuda"):
+    """
+    Safe AutoEncoder loading that bypasses ComfyUI's torch.load wrapper
+    """
+    import torch
+    from safetensors.torch import load_file as load_sft
+    import os
+    
+    print(f"Loading AutoEncoder with safe method from: {ae_path}")
+    
+    # Check file exists
+    if not os.path.exists(ae_path):
+        raise FileNotFoundError(f"AutoEncoder file not found: {ae_path}")
+    
+    # Try to bypass ComfyUI's torch.load wrapper by using the original function
+    original_torch_load = None
+    try:
+        # Store original torch.load
+        original_torch_load = torch.load
+        
+        # Try to get the real torch.load if it's been wrapped
+        if hasattr(torch, '_original_load'):
+            torch.load = torch._original_load
+        elif hasattr(torch, 'serialization'):
+            # Use the direct serialization module
+            import torch.serialization
+            torch.load = torch.serialization.load
+    except:
+        pass
+    
+    try:
+        # Method 1: Try safetensors first (most reliable)
+        try:
+            print("Attempting safetensors loading...")
+            sd = load_sft(ae_path, device=str(device))
+            print(f"✅ Safetensors loading successful with {len(sd)} keys")
+            return sd
+        except Exception as e1:
+            print(f"Safetensors failed: {e1}")
+            
+            # Method 2: Direct torch.load bypass
+            try:
+                print("Attempting direct torch.load...")
+                # Use Python's built-in open and pickle directly
+                import pickle
+                with open(ae_path, 'rb') as f:
+                    sd = pickle.load(f)
+                    if isinstance(sd, dict):
+                        # Move tensors to device
+                        for k, v in sd.items():
+                            if isinstance(v, torch.Tensor):
+                                sd[k] = v.to(device)
+                        print(f"✅ Direct pickle loading successful with {len(sd)} keys")
+                        return sd
+            except Exception as e2:
+                print(f"Direct pickle failed: {e2}")
+                
+                # Method 3: Try with file handle directly
+                try:
+                    print("Attempting file handle loading...")
+                    with open(ae_path, 'rb') as f:
+                        sd = torch.load(f, map_location=str(device))
+                    print(f"✅ File handle loading successful")
+                    return sd
+                except Exception as e3:
+                    print(f"File handle loading failed: {e3}")
+                    
+                    # All methods failed
+                    raise Exception(f"All AutoEncoder loading methods failed: {e1}, {e2}, {e3}")
+    
+    finally:
+        # Restore original torch.load if we changed it
+        if original_torch_load is not None:
+            torch.load = original_torch_load
